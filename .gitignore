@@ -1,0 +1,11 @@
+*.gem
+.bundle
+.sass-cache
+_site/
+Gemfile.lock
+**/.ruby-version
+.idea/*
+_site
+.DS_Store
+.jekyll
+.jekyll-cache
