@@ -132,6 +132,113 @@ you probably want to run them separately.
 
 ### Dynamic compile
 
+Once we have sources in place basically we want to compile and run them.  
+The simplest thing I could think is binding everything to a String template which represent our source code wrapped in a common interface 
+so if compile actually works we load it into class loader, create an instance cast it to Callable in this case (because of checked exceptions)  
+and run it.
+
+Binding is pretty simple; import everything from type where javadoc is written, add all doc test imports and wrap into Callable.
+
+```kotlin
+    private fun bindDocTestCode(typeInfo: TypeInfo, docTestCode: DocTestCode) =
+        """
+            package ${typeInfo.`package`};
+            ${typeInfo.imports.joinAsImportMultiline()}
+            ${docTestCode.docTestImports.joinMultiline()}
+            
+            public class ${typeInfo.name}_JDocTest implements java.util.concurrent.Callable {
+                public Object call() throws Exception {
+                    ${docTestCode.docTestCode.joinMultiline()}
+                    return null;
+                }
+            }
+        """
+```
+
+Once we have that we write everything into a file, must have a valid folder structure matching the package and it's ready for compile.
+Dynamic compile sounds more interesting than it actually is - Java kills a bit of fun here with a clumsy [dynamic compiler API](https://docs.oracle.com/javase/7/docs/api/javax/tools/JavaCompiler.html).
+
+```kotlin
+    private fun compileClassSource(source: Path): DiagnosticCollector<JavaFileObject> {
+        val compiler = ToolProvider.getSystemJavaCompiler()
+        val diagnostics = DiagnosticCollector<JavaFileObject>()
+        val fileManager = compiler.getStandardFileManager(diagnostics, null, null)
+
+        val optionList = listOf("-classpath", classpath)
+        fileManager.use {
+            val fileObject = fileManager.getJavaFileObjects(source)
+            compiler.getTask(null, fileManager, diagnostics, optionList, null, fileObject).call()
+        }
+
+        return diagnostics
+    }
+```
+
+Classpath here is a bit tricky to resolve because of project dependencies - so to keep it simple dependencies are copied into target and  
+along with compiled classes that's all we need to run any code in doc test - ofc that can be improved and if a miracle happens someone's PR  
+will address this issues on plugin side (we'll get later to that) to resolve all project dependencies without the overhead of copying.
+
+Dynamic compile could also be improved to compile everything in-memory with a custom compiler file manager, so we don't need to create anything on FS.
+
+Oh well... once we compile the source all that's left is to load it into class loader, create and instance and in our case 
+invoke `call()`
+
+```kotlin
+    private fun createClassInstance(path: Path, fullClassName: String): Callable<*> {
+        log.debug("Creating instance of $fullClassName")
+        val paths = classpathElements.map { Path.of(it).toUri().toURL() }.toMutableList()
+        paths += path.toUri().toURL()
+
+        val classLoader = URLClassLoader.newInstance(paths.toTypedArray()).also {
+            it.setDefaultAssertionStatus(true)
+        }
+        return classLoader.loadClass(fullClassName)
+            .getDeclaredConstructor()
+            .newInstance()
+            as Callable<*>
+    }
+```
+
+Core part is fail-fast so any compile or runtime errors will be propagated up call stack.
 
 ### Plugin
 
+We need to run the core part somehow - creating a maven plugin is the first choice here, easy to use and integrate into build lifecycle.  
+Nothing special on the plugin side just collects all classpath elements - in this case all in project target and invokes the core lib.
+
+```kotlin
+@Mojo(name = "jdoctest", defaultPhase = LifecyclePhase.VERIFY)
+class JDocTestMojo : AbstractMojo() {
+
+    @Parameter(defaultValue = ".")
+    lateinit var docPath: String
+
+    @Parameter(defaultValue = "\${project}", required = true, readonly = true)
+    lateinit var project: MavenProject
+
+    override fun execute() {
+        try {
+            val cp = project.runtimeClasspathElements.plus(projectDependencies())
+            JDocTest().processSources(docPath, cp)
+        } catch (e: RuntimeException) {
+            throw MojoExecutionException(e.message, e.cause ?: e)
+        }
+    }
+
+    private fun projectDependencies() = project.basedir?.listFiles()
+        ?.filter { it.path.contains("target") }
+        ?.flatMap { target ->
+            target?.listFiles()
+                ?.find { it.path.contains("dependency") }
+                ?.listFiles()
+                ?.map { it.absolutePath } ?: emptyList()
+        } ?: throw IllegalStateException("Can't access project base dir")
+}
+```
+
+Doc test validation is run on verify phase by default and support path/package opt-in validation just in case.
+
+
+
+#### GH Repo
+[Available here](https://github.com/dejankos/jdoctest)
