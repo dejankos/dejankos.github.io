@@ -1,7 +1,7 @@
 ---
 layout: post 
-title: JDocTest - test your documentation examples 
-description: Compile and run example code in javadoc
+title: Compile and run example code in Javadoc with JDocTest
+description: JDocTest - test your documentation examples
 tags: java javadoc ast compile kotlin rust
 comments: true
 ---
